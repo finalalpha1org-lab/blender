@@ -1,0 +1,58 @@
+# Paths the branding patch set is allowed to touch (see docs/REBRANDING.md in the
+# Final-Effect-3D repository).
+#
+# Matching rule: a changed path is allowed if it starts with one of the prefixes
+# below. Broad source prefixes are listed because the product name appears inside
+# UI code; narrow them as the patch set becomes precise.
+#
+# NOT allowed, ever (the check fails on these):
+#   source/blender/blenloader/                          .blend writer/reader
+#   source/blender/blenkernel/BKE_blender_version.h      file format constants
+
+# --- build and product identity ---
+CMakeLists.txt
+source/creator/CMakeLists.txt
+
+# --- splash, icons, default assets ---
+release/datafiles/splash.png
+release/datafiles/splash_template.xcf
+release/datafiles/blender_icons_geom.py
+release/datafiles/blender_icons_geom_update.py
+release/datafiles/icons/
+release/datafiles/icons_svg/
+release/datafiles/icons_blend/
+release/datafiles/startup.blend
+release/datafiles/preview.blend
+release/datafiles/preview_grease_pencil.blend
+
+# --- platform packaging ---
+release/windows/icons/
+release/windows/installer_wix/
+release/windows/msix/
+release/windows/manifest/
+release/windows/batch/
+release/darwin/Blender.app/
+release/darwin/blender_liquid_glass.icon/
+release/darwin/scripts/
+release/freedesktop/blender.desktop
+release/freedesktop/org.blender.Blender.metainfo.xml
+release/freedesktop/icons/
+release/freedesktop/snap/
+release/text/
+release/release_notes
+
+# --- in-application strings ---
+README.md
+doc/manpage/
+scripts/startup/bl_ui/
+scripts/addons_core/
+source/blender/editors/
+source/blender/windowmanager/
+
+# --- localisation (scripted replacement pass only) ---
+locale/po/
+
+# --- our own tooling ---
+tools/rebrand/
+.github/workflows/fork-sync.yml
+docs/
