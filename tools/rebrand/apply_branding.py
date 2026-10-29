@@ -8,10 +8,12 @@ Run this after every upstream sync (see docs/SYNC.md). Dry-run by default:
 
 Guarantees:
   * only paths listed in tools/rebrand/branding-paths.txt are modified
-  * no-touch paths (blenloader, file-format constants, licence texts, AUTHORS)
-    are never modified
+  * no-touch paths (blenloader, file-format constants, licence texts, AUTHORS,
+    localisation) are never modified
+  * our own tooling and documentation are never rewritten by themselves
   * attribution lines (SPDX, copyright, licence wording) are never rewritten
-  * the pass is idempotent: a second run reports zero replacements
+  * build identity is applied before the word pass, so the pass is idempotent:
+    a second run reports zero replacements
 '''
 
 import argparse
@@ -32,6 +34,14 @@ NO_TOUCH = (
     'locale/',
 )
 
+# Our own files: they describe the brand, they are not part of the product.
+PROTECTED = (
+    'tools/rebrand/',
+    '.github/workflows/fork-sync.yml',
+    'docs/',
+    'tests/',
+)
+
 ATTRIBUTION_MARKERS = (
     'spdx-filecopyrighttext',
     'spdx-license-identifier',
@@ -49,6 +59,8 @@ TEXT_EXTENSIONS = (
     '.desktop', '.wxs', '.template', '.rc', '.bat', '.sh', '.iss', '.plist',
     '.manifest', '.ts', '.glsl', '.pyi', '.cfg', '.def', '.inc', '.appdata',
 )
+
+IDENTITY_FILES = ('CMakeLists.txt', 'source/creator/CMakeLists.txt')
 
 
 def load_config():
@@ -73,10 +85,14 @@ def load_allow_list():
     return patterns
 
 
-def allowed(path, patterns):
-    if any(path.startswith(blocked) for blocked in NO_TOUCH):
-        return False
-    return any(path.startswith(pattern) for pattern in patterns)
+def skip_reason(path, patterns):
+    if any(path.startswith(prefix) for prefix in NO_TOUCH):
+        return 'no-touch'
+    if any(path.startswith(prefix) for prefix in PROTECTED):
+        return 'protected'
+    if not any(path.startswith(pattern) for pattern in patterns):
+        return 'not allow-listed'
+    return None
 
 
 def tracked_files():
@@ -102,13 +118,18 @@ def read(path):
         return handle.read()
 
 
+def write(path, text):
+    with open(os.path.join(ROOT, path), 'w', encoding='utf-8') as handle:
+        handle.write(text)
+
+
 def is_attribution(line):
     low = line.lower()
     return any(marker in low for marker in ATTRIBUTION_MARKERS)
 
 
 def replace_word(text, word, replacement):
-    '''Replace standalone occurrences of word without regular expressions.'''
+    '''Replace standalone occurrences of word, without regular expressions.'''
     out = []
     index = 0
     count = 0
@@ -130,12 +151,11 @@ def replace_word(text, word, replacement):
     return ''.join(out), count
 
 
-def rewrite(text, tokens):
-    '''Apply tokens to a whole file, skipping attribution lines.'''
-    lines = text.split('\n')
+def rewrite_lines(text, tokens):
+    '''Apply word tokens line by line, skipping attribution lines.'''
     total = 0
     result = []
-    for line in lines:
+    for line in text.split('\n'):
         if is_attribution(line):
             result.append(line)
             continue
@@ -147,34 +167,27 @@ def rewrite(text, tokens):
     return '\n'.join(result), total
 
 
-def cmake_identity(text, config, report):
-    '''Product identity inside the build system (substring edits, no regex).'''
-    edits = [
+def identity_edits(config):
+    app_id = config['APP_ID']
+    return (
         ('project(Blender)', 'project(' + config['PRODUCT_SLUG'] + ')'),
-        ('BLENDER_WIN_APPID="blender.', 'BLENDER_WIN_APPID="' + config['APP_ID'] + '.'),
+        ('BLENDER_WIN_APPID="blender.', 'BLENDER_WIN_APPID="' + app_id + '.'),
         ('BLENDER_WIN_APPID_FRIENDLY_NAME="Blender ', 'BLENDER_WIN_APPID_FRIENDLY_NAME="' + config['PRODUCT_NAME'] + ' '),
-    ]
+    )
+
+
+def apply_identity(text, edits, report, path):
+    '''Build identity first, so the word pass never sees these strings.'''
     count = 0
     for old, new in edits:
         if old in text:
             text = text.replace(old, new)
             count += 1
-            report.append('identity: ' + old[:48] + ' -> ' + new[:48])
+            report.append('%s: %s -> %s' % (path, old[:46], new[:46]))
     return text, count
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--apply', action='store_true', help='write changes (default is dry-run)')
-    args = parser.parse_args()
-
-    config = load_config()
-    patterns = load_allow_list()
-    missing = [key for key in ('PRODUCT_NAME', 'PRODUCT_SLUG', 'APP_ID') if not config.get(key)]
-    if missing:
-        print('brand.conf is missing: ' + ', '.join(missing))
-        return 2
-
+def build_tokens(config):
     tokens = []
     if config.get('REPLACE_WORD_BLENDER') == '1':
         tokens.append(('Blender', config['PRODUCT_NAME']))
@@ -184,51 +197,76 @@ def main():
         tokens.append(('blender.org', config.get('URL_REPLACEMENT', '')))
     if config.get('REPLACE_LOWER_BLENDER') == '1':
         tokens.append(('blender', config['PRODUCT_SLUG']))
+    return tokens
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--apply', action='store_true', help='write changes (default is dry-run)')
+    parser.add_argument('--verbose', action='store_true', help='list skipped paths')
+    args = parser.parse_args()
+
+    config = load_config()
+    patterns = load_allow_list()
+    missing = [key for key in ('PRODUCT_NAME', 'PRODUCT_SLUG', 'APP_ID') if not config.get(key)]
+    if missing:
+        print('brand.conf is missing: ' + ', '.join(missing))
+        return 2
+
+    tokens = build_tokens(config)
+    edits = identity_edits(config)
 
     report = []
     changed = []
+    skip_counts = {}
     replacements = 0
-    skipped_binary = 0
 
     for path in tracked_files():
-        if not allowed(path, patterns):
+        reason = skip_reason(path, patterns)
+        if reason is not None:
+            skip_counts[reason] = skip_counts.get(reason, 0) + 1
+            if args.verbose and reason == 'protected':
+                print('protected, not modified: ' + path)
             continue
         if not is_text(path):
-            skipped_binary += 1
+            skip_counts['non-text'] = skip_counts.get('non-text', 0) + 1
             continue
         try:
             text = read(path)
         except (UnicodeDecodeError, OSError):
-            skipped_binary += 1
+            skip_counts['non-text'] = skip_counts.get('non-text', 0) + 1
             continue
-        new_text, hits = rewrite(text, tokens)
-        if path in ('CMakeLists.txt', 'source/creator/CMakeLists.txt'):
-            new_text, identity_hits = cmake_identity(new_text, config, report)
+        new_text = text
+        hits = 0
+        if path in IDENTITY_FILES:
+            new_text, identity_hits = apply_identity(new_text, edits, report, path)
             hits += identity_hits
+        new_text, word_hits = rewrite_lines(new_text, tokens)
+        hits += word_hits
         if hits and new_text != text:
             replacements += hits
             changed.append((path, hits))
             if args.apply:
-                with open(os.path.join(ROOT, path), 'w', encoding='utf-8') as handle:
-                    handle.write(new_text)
+                write(path, new_text)
 
     print('brand target: ' + config['PRODUCT_NAME'] + '  (app id ' + config['APP_ID'] + ')')
     print('mode: ' + ('APPLY' if args.apply else 'dry-run'))
-    print('files with replacements: %d, replacements: %d, non-text files skipped: %d'
-          % (len(changed), replacements, skipped_binary))
+    print('files with replacements: %d, replacements: %d' % (len(changed), replacements))
     for path, hits in changed[:60]:
         print('  %5d  %s' % (hits, path))
     if len(changed) > 60:
         print('  ... and %d more files' % (len(changed) - 60))
     for line in report:
         print('  ' + line)
+    print('skipped: ' + ', '.join('%s %d' % (k, v) for k, v in sorted(skip_counts.items())))
 
     print('')
     print('next steps:')
     print('  * artwork that cannot be scripted (splash.png, icons, .blend defaults)')
     print('    still needs manual replacement - see docs/REBRANDING.md section 3.2')
     print('  * build, then walk the verification checklist in docs/REBRANDING.md section 5')
-    print('  * review the diff: git diff --name-only -- .  (must stay inside branding-paths.txt)')
+    print('  * review the diff: git diff --name-only  (must stay inside branding-paths.txt,')
+    print('    and never touch the no-touch paths listed at the top of that file)')
     if not args.apply:
         print('  * nothing was written (dry-run)')
     return 0
