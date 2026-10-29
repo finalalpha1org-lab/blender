@@ -1,0 +1,56 @@
+# Reports how far this fork is from upstream Blender, verifies that the branding
+# branch only touches allow-listed paths, and (when dispatched manually) runs a
+# rebase dry-run against upstream main.
+#
+# NOTE: the schedule only fires once this workflow is present on the repository
+# default branch. Until the default branch is switched to final-effect-3d, run it
+# from Actions -> fork-sync -> Run workflow.
+name: fork-sync
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - final-effect-3d
+  schedule:
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  divergence:
+    name: divergence and branding drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Report divergence from upstream Blender
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 tools/rebrand/check_divergence.py final-effect-3d
+
+  rebase-dry-run:
+    name: rebase dry-run against upstream main
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Rebase branding commits onto upstream main (no push)
+        run: |
+          set -euo pipefail
+          git config user.email ci@finalalpha.local
+          git config user.name fork-sync-ci
+          git remote add upstream https://github.com/blender/blender.git
+          git fetch --no-tags upstream main
+          echo 'branding commits to replay:'
+          git log --oneline upstream/main..HEAD
+          if git rebase upstream/main; then
+            echo 'rebased cleanly: the branding patch set still applies to upstream main'
+            git rebase --abort 2>/dev/null || true
+          else
+            echo '::error::rebase conflicts - resolve them locally with the procedure in docs/SYNC.md'
+            git rebase --abort 2>/dev/null || true
+            exit 1
+          fi
